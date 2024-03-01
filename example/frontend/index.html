@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+  <title>PP - Websockets</title>
+</head>
+
+<body>
+<div class="center">
+  <h1>Amazing Chat Application</h1>
+  <h3 id="chat-header">Currently in chat: general</h3>
+
+  <!--
+  Here is a form that allows us to select what Chatroom to be in
+  -->
+  <form id="chatroom-selection">
+    <label for="chatroom">Chatroom:</label>
+    <input type="text" id="chatroom" name="chatroom"><br><br>
+    <input type="submit" value="Change chatroom">
+  </form>
+
+  <br>
+  <!--
+  Textarea to show messages from users
+  -->
+  <textarea class="messagearea" id="chatmessages" readonly name="chatmessages" rows="4" cols="50"
+            placeholder="Welcome to the general chatroom, here messages from others will appear"></textarea>
+
+  <br>
+  <!--
+  Chatroom-message form is used to send messages
+  -->
+  <form id="chatroom-message">
+    <label for="message">Message:</label>
+    <input type="text" id="message" name="message"><br><br>
+    <input type="submit" value="Send message">
+  </form>
+</div>
+
+<!--
+    Javascript that is used to Connect to Websocket and Handle New messages
+-->
+<script type="text/javascript">
+  var conn = null;
+
+  // selectedchat is by default General.
+  var selectedchat = "general";
+
+  /**
+   * Message is used to wrap all messages Send and Recieved
+   * on the Websocket
+   * The type is used as a RPC
+   * */
+  class Message {
+    // Each Message needs a Type
+    // The payload is not required
+    constructor(type, payload) {
+      this.type = type;
+      this.payload = payload;
+    }
+  }
+
+  /**
+   * SendChatMessage is used to send messages to other clients
+   * */
+  class SendChatMessage {
+    constructor(message, from) {
+      this.message = message;
+      this.from = from;
+    }
+  }
+
+  /**
+   * NewChatMessage represents incoming messages (from clients).
+   * */
+  class NewChatMessage {
+    constructor(message, from, sent) {
+      this.message = message;
+      this.from = from;
+      this.sent = sent;
+    }
+  }
+
+  /**
+   * ChangeChatRoomMessage is used to switch chatroom
+   * */
+  class ChangeChatRoomMessage {
+    constructor(name) {
+      this.name = name;
+    }
+  }
+
+  /**
+   * routeMessage is a proxy function that routes messages
+   * to their correct Handler based on the type field.
+   * */
+  function routeMessage(msg) {
+    if (msg.type === undefined) {
+      alert("no 'type' field in msg");
+    }
+    switch (msg.type) {
+      case "new_message":
+        console.log("new message");
+        // Format payload
+        const chatMessage = Object.assign(new NewChatMessage, msg.payload);
+        appendChatMessage(chatMessage);
+        break;
+      default:
+        alert("unsupported message type");
+        break;
+    }
+  }
+
+  /**
+   * appendChatMessage takes in new messages and adds them to the chat
+   * */
+  function appendChatMessage(chatMessage) {
+    var date = new Date(chatMessage.sent);
+    // format message
+    const formattedMsg = `${date.toLocaleString()}: ${chatMessage.message}`;
+    // Append Message
+    textarea = document.getElementById("chatmessages");
+    textarea.innerHTML = textarea.innerHTML + "\n" + formattedMsg;
+    textarea.scrollTop = textarea.scrollHeight;
+  }
+
+  /**
+   * changeChatRoom will update the value of selectedchat
+   * and also notify the server that it changes chatroom
+   * */
+  function changeChatRoom() {
+    // Change Header to reflect the Changed chatroom
+    var newchat = document.getElementById("chatroom");
+    if (newchat != null && newchat.value != selectedchat) {
+      selectedchat = newchat.value;
+      header = document.getElementById("chat-header").innerHTML = "Currently in chat: " + selectedchat;
+
+      let chatroomChangeMessage = new ChangeChatRoomMessage(selectedchat);
+      sendWSMessage("change_room", chatroomChangeMessage);
+      textarea = document.getElementById("chatmessages");
+      textarea.innerHTML = `You changed room into: ${selectedchat}`;
+    }
+    return false;
+  }
+  /**
+   * sendChatMessage will send a new chat message onto the Websocket
+   * */
+  function sendChatMessage() {
+    var newmessage = document.getElementById("message");
+    if (newmessage != null) {
+      console.log("SENDING: ", newmessage.value);
+      let outgoingMsg = new SendChatMessage(newmessage.value, "jack");
+      sendWSMessage("send_message", outgoingMsg);
+    }
+    return false;
+  }
+
+  /**
+   * sendWSMessage
+   * msgType - the ws message type to send
+   * payload - the data payload
+   * */
+  function sendWSMessage(msgType, payload) {
+    const msg = new Message(msgType, payload);
+    // Format as JSON and send
+    conn.send(JSON.stringify(msg));
+  }
+
+  /**
+   * Once the website loads, we want to apply listeners and connect to websocket
+   * */
+  window.onload = function () {
+    // Apply our listener functions to the submit messages on both forms
+    // we do it this way to avoid redirects
+    document.getElementById("chatroom-selection").onsubmit = changeChatRoom;
+    document.getElementById("chatroom-message").onsubmit = sendChatMessage;
+
+    // Check if the browser supports WebSocket
+    if (window["WebSocket"]) {
+      console.log("supports websockets");
+      // Connect to websocket
+      conn = new WebSocket("ws://" + document.location.host + "/ws");
+
+      // // Add a listener to the onmessage event
+      // conn.onmessage = function(evt) {
+      //   console.log(evt);
+      // }
+
+      // Connection opened
+      conn.addEventListener("open", (event) => {
+        console.log("Connection opened.");
+        // conn.send("Hello Server!");
+      });
+
+      // Listen for messages
+      conn.addEventListener("message", (event) => {
+        console.log("Message from server ", event.data);
+
+        // parse websocket message as JSON
+        const eventData = JSON.parse(event.data);
+        // Assign JSON data to new Message Object
+        const msgObj = Object.assign(new Message, eventData);
+        // Let router manage message
+        routeMessage(msgObj);
+      });
+    } else {
+      alert("Not supporting websockets");
+    }
+  };
+</script>
+
+<style type="text/css">
+  body {
+    overflow: hidden;
+    padding: 0;
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    background: rgb(166, 156, 156);
+  }
+
+  .center {
+    margin: auto;
+    width: 50%;
+    border: 3px solid green;
+    padding: 10px;
+  }
+</style>
+
+</body>
+
+</html>

@@ -12,7 +12,7 @@ import (
 
 var (
 	// pongWait is how long we will await for a pong response
-	pongWait = 10 * time.Second
+	pongWait = 15 * time.Second
 
 	// pingInterval has to be less than pongWait
 	// (otherwise we'd start sending other pings before getting pong responses)
@@ -39,6 +39,8 @@ type Connection struct {
 	// (The WebSocket connection is only allowed to have one concurrent writer)
 	egress chan Message
 
+	lastErr error
+
 	// per-connection/client application/service specific user data
 	userData any
 }
@@ -62,11 +64,28 @@ func NewConnection(conn *websocket.Conn, manager *Manager) *Connection {
 // Close cleanly closes the connection
 func (c *Connection) Close() {
 	if c.connection != nil {
+		if !c.closeSent {
+			_ = c.sendCloseMessage()
+		}
 		_ = c.connection.Close()
 	}
 	if c.manager != nil {
 		c.manager.RemoveConnection(c)
 	}
+}
+
+func (c *Connection) IsErr() bool {
+	return c.lastErr != nil
+}
+
+func (c *Connection) LastError() error {
+	return c.lastErr
+}
+
+func (c *Connection) ClearErr() error {
+	lastErr := c.lastErr
+	c.lastErr = nil
+	return lastErr
 }
 
 // Manager returns the manager associated with this connection.
@@ -93,6 +112,13 @@ func (c *Connection) pongHandler(pongMsg string) error {
 	// Current time + Pong Wait time
 	c.logger.Debug().Msg("received pong")
 	return c.connection.SetReadDeadline(time.Now().Add(pongWait))
+}
+
+func (c *Connection) SendClose() error {
+	if !c.closeSent {
+		return c.sendCloseMessage()
+	}
+	return nil
 }
 
 func (c *Connection) sendCloseMessage() error {
@@ -124,6 +150,8 @@ func (c *Connection) ReadMessages(ctx context.Context) {
 	// Configure Wait time for Pong response, use Current time + pongWait
 	// This has to be done here to set the first initial timer.
 	if err := c.connection.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
+		wErr := fmt.Errorf("can't set read deadline: %w", err)
+		c.lastErr = wErr
 		c.logger.Error().Err(err).Msg("can't set read deadline")
 		return
 	}
@@ -134,6 +162,8 @@ func (c *Connection) ReadMessages(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			wErr := fmt.Errorf("context canceled: %w", ctx.Err())
+			c.lastErr = wErr
 			c.logger.Debug().Err(ctx.Err()).Msgf("context canceled: %v", ctx.Err())
 			return // exit from goroutine
 		default:
@@ -143,29 +173,37 @@ func (c *Connection) ReadMessages(ctx context.Context) {
 		// ReadMessage is used to read the next message in queue
 		// in the connection
 		messageType, payload, err := c.connection.ReadMessage()
+		_ = messageType
 
 		if err != nil {
 			// If Connection is closed, we will receive an error here
 			// We only want to log Strange errors, but not simple Disconnection
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				wErr := fmt.Errorf("error reading message: %w", err)
+				c.lastErr = wErr
 				c.logger.Error().Err(err).Msg("error reading message")
 			}
 			break // Break the loop to close conn & Cleanup
 		}
-		c.logger.Debug().
-			Int("message-type", messageType).
-			Str("payload", string(payload)).Msg("received message")
+		// c.logger.Debug().
+		// 	Int("message-type", messageType).
+		// 	// Str("payload", string(payload)).
+		// 	Msg("received message")
 
 		// Unmarshal incoming data into a Message struct
 		var request Message
 		if err := json.Unmarshal(payload, &request); err != nil {
+			wErr := fmt.Errorf("error unmarshalling data into message: %w", err)
+			c.lastErr = wErr
 			c.logger.Error().Err(err).Msg("error unmarshalling data into message")
 			break // Breaking the connection here might be harsh xD
 		}
 
 		// Route the Message
 		if err := c.manager.routeMessage(request, c); err != nil {
-			c.logger.Error().Err(err).Msg("error handling message")
+			wErr := fmt.Errorf("error handling message (routing): %w", err)
+			c.lastErr = wErr
+			c.logger.Warn().Err(err).Msg("error handling message")
 		}
 	}
 }
@@ -186,6 +224,8 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			wErr := fmt.Errorf("context canceled: %w", ctx.Err())
+			c.lastErr = wErr
 			c.logger.Debug().Err(ctx.Err()).Msgf("context canceled: %v", ctx.Err())
 			_ = c.sendCloseMessage()
 			return // exit from goroutine
@@ -200,19 +240,25 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 
 			data, err := json.Marshal(msg)
 			if err != nil {
+				wErr := fmt.Errorf("error marshalling message: %w", err)
+				c.lastErr = wErr
 				c.logger.Error().Err(err).Msg("error marshalling message")
 				return // closes the connection, should we really
 			}
 			// Write a Regular text message to the connection
 			if err := c.connection.WriteMessage(websocket.TextMessage, data); err != nil {
+				wErr := fmt.Errorf("error sending data: %w", err)
+				c.lastErr = wErr
 				c.logger.Error().Err(err).Msg("error sending data")
 			}
-			c.logger.Debug().Msg("sent message")
+			// c.logger.Debug().Msg("sent message")
 
 		case <-ticker.C:
 			c.logger.Debug().Msg("send ping")
 			// Send the Ping
 			if err := c.connection.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+				wErr := fmt.Errorf("error sending ping: %w", err)
+				c.lastErr = wErr
 				c.logger.Error().Err(err).Msg("error sending ping")
 				return // return to break this goroutine triggering cleanup
 			}

@@ -165,15 +165,23 @@ func (m *Manager) routeMessage(msg Message, c *Connection) error {
 		}
 		return nil
 	} else {
-		return ErrMessageNotSupported
+		// TODO: add an option to turn unsupported messages into errors
+		// ignore unsupported messages
+		// return ErrMessageNotSupported
 	}
+	return nil
 }
 
 // GetWSHandler returns an HTTP Handler to serve websocket connections through the Manager.
 func (m *Manager) GetWSHandler(ctx context.Context) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m.logger.Debug().Msg("new connection")
-		_ = m.Upgrade(ctx, w, r)
+		var wg sync.WaitGroup
+		_ = m.UpgradeExt(ctx, &wg, w, r)
+
+		// m.logger.Debug().Msg("waiting for goroutines...")
+		wg.Wait()
+		// m.logger.Debug().Msg("exiting from WS handler")
 	}
 }
 
@@ -199,6 +207,41 @@ func (m *Manager) Upgrade(outerCtx context.Context, w http.ResponseWriter, r *ht
 	// writer, we can fix this by having an unbuffered channel act as a locker.
 	go client.ReadMessages(outerCtx)
 	go client.WriteMessages(outerCtx)
+	return client
+}
+
+// Upgrade upgrades the HTTP server connection to the WebSocket protocol, creates a new high-level connection and starts
+// read/write goroutines.
+func (m *Manager) UpgradeExt(outerCtx context.Context, wg *sync.WaitGroup, w http.ResponseWriter, r *http.Request) *Connection {
+	// Upgrade the HTTP request
+	websocketUpgrader := m.getUpgrader()
+	conn, err := websocketUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		m.logger.Error().Err(err).Msg("can't upgrade connection")
+		// http error status already returned by websocket.Upgrade()
+		return nil
+	}
+
+	// Create New Connection
+	client := NewConnection(conn, m)
+	// Add the newly created client to the manager
+	m.AddConnection(client)
+
+	// Start the read / write processes
+	// NOTE: the WebSocket connection is only allowed to have one concurrent
+	// writer, we can fix this by having an unbuffered channel act as a locker.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client.ReadMessages(outerCtx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		client.WriteMessages(outerCtx)
+	}()
+
 	return client
 }
 

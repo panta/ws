@@ -173,25 +173,33 @@ func (m *Manager) routeMessage(msg Message, c *Connection) error {
 func (m *Manager) GetWSHandler(ctx context.Context) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m.logger.Debug().Msg("new connection")
-		// Begin by upgrading the HTTP request
-		websocketUpgrader := m.getUpgrader()
-		conn, err := websocketUpgrader.Upgrade(w, r, nil)
-		if err != nil {
-			m.logger.Error().Err(err).Msg("can't upgrade connection")
-			return
-		}
-
-		// Create New Connection
-		client := NewConnection(conn, m)
-		// Add the newly created client to the manager
-		m.AddConnection(client)
-
-		// Start the read / write processes
-		// NOTE: the WebSocket connection is only allowed to have one concurrent
-		// writer, we can fix this by having an unbuffered channel act as a locker.
-		go client.ReadMessages(ctx)
-		go client.WriteMessages(ctx)
+		_ = m.Upgrade(ctx, w, r)
 	}
+}
+
+// Upgrade upgrades the HTTP server connection to the WebSocket protocol, creates a new high-level connection and starts
+// read/write goroutines.
+func (m *Manager) Upgrade(outerCtx context.Context, w http.ResponseWriter, r *http.Request) *Connection {
+	// Upgrade the HTTP request
+	websocketUpgrader := m.getUpgrader()
+	conn, err := websocketUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		m.logger.Error().Err(err).Msg("can't upgrade connection")
+		// http error status already returned by websocket.Upgrade()
+		return nil
+	}
+
+	// Create New Connection
+	client := NewConnection(conn, m)
+	// Add the newly created client to the manager
+	m.AddConnection(client)
+
+	// Start the read / write processes
+	// NOTE: the WebSocket connection is only allowed to have one concurrent
+	// writer, we can fix this by having an unbuffered channel act as a locker.
+	go client.ReadMessages(outerCtx)
+	go client.WriteMessages(outerCtx)
+	return client
 }
 
 // AddConnection will add a connection to our connection list.

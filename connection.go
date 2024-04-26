@@ -29,6 +29,7 @@ type Connection struct {
 
 	// the websocket connection
 	connection *websocket.Conn
+	closed     bool
 
 	closeSent bool
 
@@ -72,6 +73,17 @@ func (c *Connection) Close() {
 	if c.manager != nil {
 		c.manager.RemoveConnection(c)
 	}
+	c.closed = true
+}
+
+// Closed returns true if the connection has been closed.
+func (c *Connection) Closed() bool {
+	return c.closed
+}
+
+// Valid returns true if the connection is still active (established and not closed).
+func (c *Connection) Valid() bool {
+	return (c.connection != nil) && (!c.closed)
 }
 
 func (c *Connection) IsErr() bool {

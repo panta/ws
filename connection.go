@@ -182,7 +182,7 @@ func (c *Connection) ReadMessages(ctx context.Context) {
 			// don't block
 		}
 
-		if (!c.Valid()) || c.closeSent {
+		if (!c.Valid()) || c.closeSent || c.closed {
 			c.logger.Debug().Msg("connection not active - terminating read cycle")
 			break // Break the loop to close conn & Cleanup
 			// return // exit from goroutine
@@ -196,12 +196,24 @@ func (c *Connection) ReadMessages(ctx context.Context) {
 		if err != nil {
 			// If Connection is closed, we will receive an error here
 			// We only want to log Strange errors, but not simple Disconnection
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				wErr := fmt.Errorf("error reading message: %w", err)
-				c.lastErr = wErr
-				c.logger.Error().Err(err).Msg("error reading message")
+			if isCloseError(err) {
+				c.closed = true
+
+				if !isExpectedCloseError(err) {
+					wErr := fmt.Errorf("error reading message (unexpected close): %w", err)
+					c.lastErr = wErr
+					c.logger.Error().Err(err).Msg("error reading message (unexpected close)")
+				}
+
+				c.logger.Debug().Msg("socket closed - terminating read cycle")
+				break // Break the loop to close conn & Cleanup
 			}
-			break // Break the loop to close conn & Cleanup
+
+			wErr := fmt.Errorf("error reading message: %w", err)
+			c.lastErr = wErr
+			c.logger.Error().Err(err).Msg("error reading message")
+			// NOTE: not a close error, don't exit here
+			continue
 		}
 		// c.logger.Debug().
 		// 	Int("message-type", messageType).
@@ -256,7 +268,7 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 				return // exit from goroutine
 			}
 
-			if (!c.Valid()) || c.closeSent {
+			if (!c.Valid()) || c.closeSent || c.closed {
 				c.logger.Debug().Msg("connection not active - terminating write cycle")
 				return // exit from goroutine
 			}
@@ -270,31 +282,47 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 			}
 			// Write a Regular text message to the connection
 			if err := c.connection.WriteMessage(websocket.TextMessage, data); err != nil {
+				if isCloseError(err) {
+					c.closed = true
+
+					if !isExpectedCloseError(err) {
+						wErr := fmt.Errorf("error sending data (unexpected close): %w", err)
+						c.lastErr = wErr
+						c.logger.Error().Err(err).Msg("error sending data (unexpected close)")
+					}
+
+					c.logger.Debug().Msg("socket closed - terminating write cycle")
+					return // exit from goroutine
+				}
+
 				wErr := fmt.Errorf("error sending data: %w", err)
 				c.lastErr = wErr
 				c.logger.Error().Err(err).Msg("error sending data")
+				// NOTE: not a close error, don't exit here
+				continue
 			}
 			// c.logger.Debug().Msg("sent message")
 
 		case <-ticker.C:
-			if c.Valid() && !c.closeSent {
+			if c.Valid() && !c.closeSent && !c.closed {
 				c.logger.Debug().Msg("send ping")
 				// Send the Ping
 				if err := c.connection.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+					if isCloseError(err) {
+						c.closed = true
 
-					if _, ok := err.(*websocket.CloseError); ok {
-						if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
+						if !isExpectedCloseError(err) {
 							wErr := fmt.Errorf("error sending ping (unexpected close): %w", err)
 							c.lastErr = wErr
 							c.logger.Error().Err(err).Msg("error sending ping (unexpected close)")
 							return // return to break this goroutine triggering cleanup
-						} else {
-							// regular close - not really an error
-							c.logger.Debug().Msg("socket closed")
-							return // exit from goroutine
 						}
+
+						c.logger.Debug().Msg("socket closed - terminating write cycle")
+						return // exit from goroutine
 					}
 
+					// TODO: should we exit after multiple ping errors?
 					wErr := fmt.Errorf("error sending ping: %w", err)
 					c.lastErr = wErr
 					c.logger.Error().Err(err).Msg("error sending ping")
@@ -303,4 +331,19 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func isCloseError(err error) bool {
+	_, isCloseErr := err.(*websocket.CloseError)
+	return isCloseErr
+}
+
+func isExpectedCloseError(err error) bool {
+	if _, ok := err.(*websocket.CloseError); ok {
+		return websocket.IsCloseError(err,
+			websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived)
+	}
+
+	// not a websocket.CloseError - so this is an unexpected error
+	return false
 }

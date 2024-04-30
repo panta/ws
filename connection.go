@@ -266,13 +266,29 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 			// c.logger.Debug().Msg("sent message")
 
 		case <-ticker.C:
-			c.logger.Debug().Msg("send ping")
-			// Send the Ping
-			if err := c.connection.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-				wErr := fmt.Errorf("error sending ping: %w", err)
-				c.lastErr = wErr
-				c.logger.Error().Err(err).Msg("error sending ping")
-				return // return to break this goroutine triggering cleanup
+			if c.Valid() && !c.closeSent {
+				c.logger.Debug().Msg("send ping")
+				// Send the Ping
+				if err := c.connection.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+
+					if _, ok := err.(*websocket.CloseError); ok {
+						if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
+							wErr := fmt.Errorf("error sending ping (unexpected close): %w", err)
+							c.lastErr = wErr
+							c.logger.Error().Err(err).Msg("error sending ping (unexpected close)")
+							return // return to break this goroutine triggering cleanup
+						} else {
+							// regular close - not really an error
+							c.logger.Debug().Msg("socket closed")
+							return // exit from goroutine
+						}
+					}
+
+					wErr := fmt.Errorf("error sending ping: %w", err)
+					c.lastErr = wErr
+					c.logger.Error().Err(err).Msg("error sending ping")
+					return // return to break this goroutine triggering cleanup
+				}
 			}
 		}
 	}

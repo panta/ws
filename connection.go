@@ -256,6 +256,11 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 				return // exit from goroutine
 			}
 
+			if (!c.Valid()) || c.closeSent {
+				c.logger.Debug().Msg("connection not active - terminating write cycle")
+				return // exit from goroutine
+			}
+
 			data, err := json.Marshal(msg)
 			if err != nil {
 				wErr := fmt.Errorf("error marshalling message: %w", err)

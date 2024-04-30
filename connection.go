@@ -182,6 +182,10 @@ func (c *Connection) ReadMessages(ctx context.Context) {
 			// don't block
 		}
 
+		if (!c.Valid()) || c.closeSent {
+			break // Break the loop to close conn & Cleanup
+		}
+
 		// ReadMessage is used to read the next message in queue
 		// in the connection
 		messageType, payload, err := c.connection.ReadMessage()

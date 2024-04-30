@@ -183,7 +183,9 @@ func (c *Connection) ReadMessages(ctx context.Context) {
 		}
 
 		if (!c.Valid()) || c.closeSent {
+			c.logger.Debug().Msg("connection not active - terminating read cycle")
 			break // Break the loop to close conn & Cleanup
+			// return // exit from goroutine
 		}
 
 		// ReadMessage is used to read the next message in queue

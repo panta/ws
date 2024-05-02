@@ -171,21 +171,15 @@ func (c *Connection) ReadMessages(ctx context.Context) {
 	c.connection.SetPongHandler(c.pongHandler)
 
 	// Loop Forever
-	for {
+	for c.Valid() && !c.closeSent {
 		select {
 		case <-ctx.Done():
-			wErr := fmt.Errorf("context canceled: %w", ctx.Err())
+			wErr := ErrContextCanceled.Errorf("context canceled: %w", ctx.Err())
 			c.lastErr = wErr
 			c.logger.Debug().Err(ctx.Err()).Msgf("context canceled: %v", ctx.Err())
 			return // exit from goroutine
 		default:
 			// don't block
-		}
-
-		if (!c.Valid()) || c.closeSent || c.closed {
-			c.logger.Debug().Msg("connection not active - terminating read cycle")
-			break // Break the loop to close conn & Cleanup
-			// return // exit from goroutine
 		}
 
 		// ReadMessage is used to read the next message in queue
@@ -200,16 +194,20 @@ func (c *Connection) ReadMessages(ctx context.Context) {
 				c.closed = true
 
 				if !isExpectedCloseError(err) {
-					wErr := fmt.Errorf("error reading message (unexpected close): %w", err)
+					wErr := ErrAbnormalClose.Errorf("error reading message (unexpected close): %w", err)
 					c.lastErr = wErr
 					c.logger.Error().Err(err).Msg("error reading message (unexpected close)")
+				} else {
+					wErr := ErrConnectionClosed.Errorf("error reading message (regular connection close): %w", err)
+					c.lastErr = wErr
+					c.logger.Error().Err(err).Msg("error reading message (regular connection close)")
 				}
 
 				c.logger.Debug().Msg("socket closed - terminating read cycle")
 				break // Break the loop to close conn & Cleanup
 			}
 
-			wErr := fmt.Errorf("error reading message: %w", err)
+			wErr := ErrReadMessage.Errorf("error reading message: %w", err)
 			c.lastErr = wErr
 			c.logger.Error().Err(err).Msg("error reading message")
 			// NOTE: not a close error, don't exit here
@@ -251,10 +249,10 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 		c.manager.RemoveConnection(c)
 	}()
 
-	for {
+	for c.Valid() && !c.closeSent {
 		select {
 		case <-ctx.Done():
-			wErr := fmt.Errorf("context canceled: %w", ctx.Err())
+			wErr := ErrContextCanceled.Errorf("context canceled: %w", ctx.Err())
 			c.lastErr = wErr
 			c.logger.Debug().Err(ctx.Err()).Msgf("context canceled: %v", ctx.Err())
 			_ = c.sendCloseMessage()
@@ -265,11 +263,7 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 			if !ok {
 				// Manager has closed this connection channel, so communicate that to the peer
 				_ = c.sendCloseMessage()
-				return // exit from goroutine
-			}
-
-			if (!c.Valid()) || c.closeSent || c.closed {
-				c.logger.Debug().Msg("connection not active - terminating write cycle")
+				c.lastErr = ErrConnectionClosed
 				return // exit from goroutine
 			}
 
@@ -286,16 +280,20 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 					c.closed = true
 
 					if !isExpectedCloseError(err) {
-						wErr := fmt.Errorf("error sending data (unexpected close): %w", err)
+						wErr := ErrAbnormalClose.Errorf("error sending data (unexpected close): %w", err)
 						c.lastErr = wErr
 						c.logger.Error().Err(err).Msg("error sending data (unexpected close)")
+					} else {
+						wErr := ErrConnectionClosed.Errorf("error sending data (regular connection close): %w", err)
+						c.lastErr = wErr
+						c.logger.Error().Err(err).Msg("error sending data (regular connection close)")
 					}
 
 					c.logger.Debug().Msg("socket closed - terminating write cycle")
 					return // exit from goroutine
 				}
 
-				wErr := fmt.Errorf("error sending data: %w", err)
+				wErr := ErrSendMessage.Errorf("error sending data: %w", err)
 				c.lastErr = wErr
 				c.logger.Error().Err(err).Msg("error sending data")
 				// NOTE: not a close error, don't exit here
@@ -312,10 +310,13 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 						c.closed = true
 
 						if !isExpectedCloseError(err) {
-							wErr := fmt.Errorf("error sending ping (unexpected close): %w", err)
+							wErr := ErrAbnormalClose.Errorf("error sending ping (unexpected close): %w", err)
 							c.lastErr = wErr
 							c.logger.Error().Err(err).Msg("error sending ping (unexpected close)")
-							return // return to break this goroutine triggering cleanup
+						} else {
+							wErr := ErrConnectionClosed.Errorf("error sending ping (regular connection close): %w", err)
+							c.lastErr = wErr
+							c.logger.Error().Err(err).Msg("error sending ping (regular connection close)")
 						}
 
 						c.logger.Debug().Msg("socket closed - terminating write cycle")
@@ -323,7 +324,7 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 					}
 
 					// TODO: should we exit after multiple ping errors?
-					wErr := fmt.Errorf("error sending ping: %w", err)
+					wErr := ErrPing.Errorf("error sending ping: %w", err)
 					c.lastErr = wErr
 					c.logger.Error().Err(err).Msg("error sending ping")
 					return // return to break this goroutine triggering cleanup

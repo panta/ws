@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -29,6 +30,7 @@ type Connection struct {
 
 	// the websocket connection
 	connection *websocket.Conn
+	writeMu    sync.Mutex
 	closed     bool
 
 	closeSent bool
@@ -133,11 +135,28 @@ func (c *Connection) SendClose() error {
 	return nil
 }
 
+func (c *Connection) safeWriteMessage(messageType int, data []byte) error {
+	if c.connection == nil {
+		return fmt.Errorf("can't write to websocket - no existing connection")
+	}
+	if c.closeSent {
+		return nil
+	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	err := c.connection.WriteMessage(messageType, data)
+	if isCloseError(err) {
+		c.closed = true
+	}
+	return err
+}
+
 func (c *Connection) sendCloseMessage() error {
 	if c.closeSent {
 		return nil
 	}
-	if err := c.connection.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")); err != nil {
+	if err := c.safeWriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")); err != nil {
 		// Log that the connection is closed and the reason
 		c.logger.Error().Err(err).Msg("close message write error")
 		return fmt.Errorf("error sending close message: %w", err)
@@ -274,8 +293,9 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 				c.logger.Error().Err(err).Msg("error marshalling message")
 				return // closes the connection, should we really
 			}
+
 			// Write a Regular text message to the connection
-			if err := c.connection.WriteMessage(websocket.TextMessage, data); err != nil {
+			if err := c.safeWriteMessage(websocket.TextMessage, data); err != nil {
 				if isCloseError(err) {
 					c.closed = true
 
@@ -305,7 +325,7 @@ func (c *Connection) WriteMessages(ctx context.Context) {
 			if c.Valid() && !c.closeSent && !c.closed {
 				c.logger.Debug().Msg("send ping")
 				// Send the Ping
-				if err := c.connection.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+				if err := c.safeWriteMessage(websocket.PingMessage, []byte{}); err != nil {
 					if isCloseError(err) {
 						c.closed = true
 
